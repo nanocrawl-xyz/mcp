@@ -278,7 +278,10 @@ async function proactiveBrowse(
     } catch { /* use default */ }
   }
 
-  const data = await res.json().catch(() => res.text());
+  const contentType = res.headers.get("content-type") || "";
+  const data = contentType.includes("application/json")
+    ? await res.json()
+    : await res.text();
   return { data, formattedAmount: meta.crawlFeeUsdc.toFixed(6), transaction, status: 200 };
 }
 
@@ -355,10 +358,46 @@ server.registerTool(
         result = proactive;
         flowType = "proactive";
       } else {
-        // Fall back to standard 2-request flow
-        result = await client.pay(url);
-        flowType = "standard";
-        // Cache domain metadata for future proactive calls
+        // Fall back to standard 2-request flow via GatewayClient
+        try {
+          result = await client.pay(url);
+          flowType = "standard";
+        } catch (payErr) {
+          // GatewayClient.pay() fails on non-JSON responses (e.g. HTML pages).
+          // Fall back to manual flow: peek for 402 metadata, then proactive pay.
+          const peekRes = await fetch(url, {
+            headers: {
+              "User-Agent": "NanoCrawl/1.0 (AI agent)",
+              "X-NanoCrawl-Capable": "true",
+            },
+          });
+          if (peekRes.status !== 402) throw payErr;
+
+          // Parse 402 to get payment metadata, cache it, then use proactive flow
+          const reqHeader = peekRes.headers.get("payment-required");
+          const payReq = reqHeader
+            ? JSON.parse(Buffer.from(reqHeader, "base64").toString("utf-8"))
+            : await peekRes.json();
+          const accept = payReq?.accepts?.[0];
+          if (!accept) throw payErr;
+
+          const origin = new URL(url).origin;
+          const chainId = parseInt(accept.network.split(":")[1], 10);
+          domainMetaCache.set(origin, {
+            network: accept.network,
+            chainId,
+            asset: accept.asset,
+            payTo: accept.payTo,
+            verifyingContract: accept.extra?.verifyingContract,
+            maxTimeoutSeconds: accept.maxTimeoutSeconds,
+            crawlFeeUsdc: parseInt(accept.amount, 10) / 10 ** USDC_DECIMALS,
+          });
+
+          const retry = await proactiveBrowse(url);
+          if (!retry) throw payErr;
+          result = retry;
+          flowType = "proactive";
+        }
         getDomainMeta(url).catch(() => {});
       }
 
