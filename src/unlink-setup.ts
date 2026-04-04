@@ -122,7 +122,7 @@ async function main() {
 
   let poolBalance = "0";
   try {
-    const { balances } = await unlink.getBalances({ token: USDC });
+    const { balances } = await unlink.getBalances();
     const tokenBalance = balances.find((b: { token: string }) => b.token.toLowerCase() === USDC.toLowerCase());
     poolBalance = tokenBalance ? String(Number(tokenBalance.amount) / 1e6) : "0";
   } catch {
