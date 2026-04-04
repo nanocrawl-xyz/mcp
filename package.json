@@ -17,7 +17,8 @@
     "dev": "tsx src/index.ts",
     "test": "tsx src/test.ts",
     "setup:unlink": "tsx src/unlink-setup.ts",
-    "setup:unlink:check": "tsx src/unlink-setup.ts --check"
+    "setup:unlink:check": "tsx src/unlink-setup.ts --check",
+    "test:unlink": "tsx src/test-unlink.ts"
   },
   "dependencies": {
     "@circle-fin/x402-batching": "^2.0.4",
