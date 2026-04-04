@@ -252,6 +252,9 @@ async function proactiveBrowse(
       },
     },
     payload: { signature, authorization },
+    extensions: {
+      "payment-identifier": { id: nonce },
+    },
   };
 
   const encoded = Buffer.from(JSON.stringify(paymentPayload)).toString("base64");
