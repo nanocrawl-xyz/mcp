@@ -24,6 +24,14 @@ import { privateKeyToAccount } from "viem/accounts";
 // @ts-ignore — SDK subpath export types don't resolve under all tsconfig modes
 import { GatewayClient } from "@circle-fin/x402-batching/client";
 import { startBurnerSession, pollUntilGatewayFunded, type BurnerSession } from "./unlink/index.js";
+import {
+  createWalletClient as viemCreateWalletClient,
+  createPublicClient as viemCreatePublicClient,
+  http as viemHttp,
+  parseUnits,
+  type Address as ViemAddress,
+} from "viem";
+import { arcTestnet } from "viem/chains";
 
 // ── Wallet Management ─────────────────────────────────────────────────────
 // Auto-generates a wallet on first run; stores at ~/.nanocrawl/wallet.json.
@@ -63,6 +71,41 @@ function getOrCreateWallet(): `0x${string}` {
   );
 
   return key;
+}
+
+// ── Arc Testnet USDC transfer helper (Option C: fund burner from real EOA) ──
+
+const ARC_USDC = "0x3600000000000000000000000000000000000000" as const;
+const ARC_RPC = "https://rpc.testnet.arc.network";
+
+const _erc20TransferAbi = [
+  {
+    inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }],
+    name: "transfer",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+async function transferArcUsdc(
+  fromKey: `0x${string}`,
+  to: ViemAddress,
+  amountUsdc: string
+): Promise<void> {
+  const account = privateKeyToAccount(fromKey);
+  const publicClient = viemCreatePublicClient({ chain: arcTestnet, transport: viemHttp(ARC_RPC) });
+  const walletClient = viemCreateWalletClient({ account, chain: arcTestnet, transport: viemHttp(ARC_RPC) });
+  const amountUnits = parseUnits(amountUsdc, 6);
+  log(`Privacy mode: transferring ${amountUsdc} USDC from real EOA to burner on Arc Testnet...`);
+  const txHash = await walletClient.writeContract({
+    address: ARC_USDC,
+    abi: _erc20TransferAbi,
+    functionName: "transfer",
+    args: [to, amountUnits],
+  });
+  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  log(`Privacy mode: Arc Testnet USDC transfer tx: ${txHash}`);
 }
 
 // ── Configuration ──────────────────────────────────────────────────────────
@@ -662,7 +705,7 @@ server.registerTool(
           type: "text" as const,
           text: [
             "Privacy mode: ON (Unlink BurnerWallet)",
-            `Chain: baseSepolia`,
+            `Chain: arcTestnet (payments) / baseSepolia (burner creation via Unlink ZK pool)`,
             `Burner address: ${unlinkSession.burnerAddress}`,
             "",
             "On-chain activity is linked to the burner, not your real wallet.",
@@ -808,17 +851,21 @@ async function main() {
         engineUrl: process.env.NANOCRAWL_UNLINK_ENGINE_URL,
         rpcUrl: process.env.RPC_URL,
       });
-      // Replace Arc Testnet client with burner-backed Base Sepolia client
+      log(`Privacy mode: ON — burner ${unlinkSession.burnerAddress}`);
+      // Option C: fund burner on Arc Testnet from real EOA, then create Arc Testnet GatewayClient.
+      // Unlink creates the burner via ZK pool on Base Sepolia (identity hidden there).
+      // The Arc Testnet funding tx links real EOA → burner (testnet-only caveat).
+      const realEoaKey = privateKey; // already loaded from wallet.json or env
+      await transferArcUsdc(realEoaKey, unlinkSession.burnerAddress, sessionAmount);
       client = new GatewayClient({
-        chain: "baseSepolia",
+        chain: "arcTestnet",
         privateKey: unlinkSession.burnerPrivateKey,
       });
-      log(`Privacy mode: ON — burner ${unlinkSession.burnerAddress} (Base Sepolia)`);
-      log(`Privacy mode: depositing ${sessionAmount} USDC into Gateway from burner...`);
+      log(`Privacy mode: depositing ${sessionAmount} USDC into Gateway from burner (Arc Testnet)...`);
       await client.deposit(sessionAmount);
       log("Privacy mode: waiting for Circle Gateway to process deposit...");
       await pollUntilGatewayFunded(client);
-      log(`Privacy mode: ready — ${sessionAmount} USDC in Gateway, identity shielded`);
+      log(`Privacy mode: ready — ${sessionAmount} USDC in Gateway, burner identity used for payments`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`Privacy mode: startup failed — ${msg}`);
@@ -828,7 +875,7 @@ async function main() {
   }
 
   log(`Address: ${client.address}`);
-  log(`Chain: ${unlinkSession ? "baseSepolia (Unlink privacy mode)" : CHAIN}`);
+  log(`Chain: ${unlinkSession ? "arcTestnet (Unlink privacy mode, burner key)" : CHAIN}`);
 
   if (!unlinkSession) {
     // Standard mode: check balance and auto-deposit if Gateway is underfunded
