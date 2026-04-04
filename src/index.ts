@@ -324,7 +324,10 @@ async function proactiveBrowse(
     } catch { /* use default */ }
   }
 
-  const data = await res.json().catch(() => res.text());
+  const contentType = res.headers.get("content-type") || "";
+  const data = contentType.includes("application/json")
+    ? await res.json()
+    : await res.text();
   return { data, formattedAmount: meta.crawlFeeUsdc.toFixed(6), transaction, status: 200 };
 }
 
@@ -403,11 +406,22 @@ server.registerTool(
         result = proactive;
         flowType = "proactive";
       } else {
-        // Standard 2-request flow (always used in Unlink/Base Sepolia mode)
-        result = await client.pay(url);
-        flowType = unlinkSession ? "standard (private)" : "standard";
-        // Cache domain metadata for future proactive calls (standard mode only)
-        if (!unlinkSession) getDomainMeta(url).catch(() => {});
+        // Standard 2-request flow (always used in Unlink/Arc Testnet mode)
+        try {
+          result = await client.pay(url);
+          flowType = unlinkSession ? "standard (private)" : "standard";
+          // Cache domain metadata for future proactive calls (standard mode only)
+          if (!unlinkSession) getDomainMeta(url).catch(() => {});
+        } catch (payErr) {
+          // Fallback: peek for 402 metadata, cache it, retry proactively
+          const fallback = await proactiveBrowse(url).catch(() => null);
+          if (fallback) {
+            result = fallback;
+            flowType = "proactive (fallback)";
+          } else {
+            throw payErr;
+          }
+        }
       }
 
       const amountUsdc = parseFloat(result.formattedAmount);
