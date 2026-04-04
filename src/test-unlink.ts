@@ -13,7 +13,7 @@
 
 // @ts-ignore
 import { GatewayClient } from "@circle-fin/x402-batching/client";
-import { startBurnerSession } from "./unlink/index.js";
+import { startBurnerSession, pollUntilGatewayFunded } from "./unlink/index.js";
 
 const SELLER_URL = "https://nanocrawl.vercel.app/products/1";
 const SESSION_AMOUNT = process.env.NANOCRAWL_UNLINK_SESSION_AMOUNT ?? "5";
@@ -72,6 +72,8 @@ async function main() {
   // ── Step 3: Deposit into Gateway ─────────────────────────────────────────
   log(`Depositing ${SESSION_AMOUNT} USDC into Gateway from burner...`);
   await gw.deposit(SESSION_AMOUNT);
+  log("Waiting for Circle Gateway to process deposit (up to 60s)...");
+  await pollUntilGatewayFunded(gw);
 
   const balAfter = await gw.getBalances();
   log(`✓ Gateway balance: ${balAfter?.gateway?.formattedAvailable ?? "?"} USDC`);

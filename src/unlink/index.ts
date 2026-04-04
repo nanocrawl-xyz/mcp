@@ -14,5 +14,5 @@
  *   await gw.withdraw(formattedAvailable);
  *   await session.teardown();
  */
-export { startBurnerSession } from "./session.js";
+export { startBurnerSession, pollUntilGatewayFunded } from "./session.js";
 export type { BurnerSession, UnlinkConfig } from "./session.js";

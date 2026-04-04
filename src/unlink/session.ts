@@ -27,7 +27,7 @@ import {
   type Address,
 } from "viem";
 import { baseSepolia } from "viem/chains";
-import { CapturingBurnerStorage } from "./storage.js";
+import { CapturingBurnerStorage, loadPersistedBurner } from "./storage.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -121,40 +121,64 @@ export async function startBurnerSession(
   const account = unlinkAccount.fromMnemonic({ mnemonic: config.mnemonic });
   const accountKeys = await account.getAccountKeys();
 
-  // Create burner. CapturingBurnerStorage intercepts save() to get the private key,
-  // since BurnerWallet does not expose it via any public property or method.
+  // Check for a burner persisted from a previous session (crash recovery).
+  // If one exists and is still 'funded', restore it instead of draining the pool again.
   const storage = new CapturingBurnerStorage();
-  const burner = await BurnerWallet.create(storage);
+  let burner: BurnerWallet;
 
-  log(`burner created: ${burner.address}`);
+  const persisted = loadPersistedBurner();
+  if (persisted) {
+    log(`found persisted burner ${persisted.address} — checking status...`);
+    // Hydrate storage so BurnerWallet.restore() can load the key
+    await storage.save(persisted.address, persisted.privateKey);
+    const restored = await BurnerWallet.restore(persisted.address as Address, storage);
+    if (restored) {
+      const status = await restored.getStatus(unlinkClient);
+      if (status.status === "funded") {
+        log(`restoring funded burner ${persisted.address} (skipping fundFromPool)`);
+        burner = restored;
+      } else {
+        log(`persisted burner status=${status.status} — creating fresh burner`);
+        await storage.delete(persisted.address); // clear stale file
+        burner = await BurnerWallet.create(storage);
+      }
+    } else {
+      log(`could not restore burner — creating fresh burner`);
+      burner = await BurnerWallet.create(storage);
+    }
+  } else {
+    burner = await BurnerWallet.create(storage);
+    log(`burner created: ${burner.address}`);
+  }
 
   // Convert sessionAmountUsdc to USDC base units (6 decimals)
   const amountUnits = String(
     Math.round(parseFloat(sessionAmountUsdc) * 1_000_000)
   );
 
-  // Fund burner from Unlink privacy pool.
-  // The Unlink relayer performs a ZK-shielded withdrawal → USDC arrives at burner.
-  // Relayer also sends gas ETH to cover the burner's on-chain transactions.
-  log(`funding burner with ${sessionAmountUsdc} USDC from Unlink pool...`);
-  try {
-    await burner.fundFromPool(unlinkClient, {
-      senderKeys: accountKeys,
-      token: USDC,
-      amount: amountUnits,
-      environment: "base-sepolia",
-    });
-  } catch (err) {
-    if (err instanceof UnlinkApiError) {
-      throw new Error(
-        `Unlink API error during fundFromPool: ${err.message} (code: ${err.code})`
-      );
+  // Fund burner only if it isn't already funded (fresh burner path)
+  const currentStatus = await burner.getStatus(unlinkClient).catch(() => null);
+  if (currentStatus?.status !== "funded") {
+    log(`funding burner with ${sessionAmountUsdc} USDC from Unlink pool...`);
+    try {
+      await burner.fundFromPool(unlinkClient, {
+        senderKeys: accountKeys,
+        token: USDC,
+        amount: amountUnits,
+        environment: "base-sepolia",
+      });
+    } catch (err) {
+      if (err instanceof UnlinkApiError) {
+        throw new Error(
+          `Unlink API error during fundFromPool: ${err.message} (code: ${err.code})`
+        );
+      }
+      throw err;
     }
-    throw err;
+    // Poll until status reaches 'funded' (USDC + gas ETH confirmed at burner)
+    await pollUntilFunded(burner, unlinkClient);
   }
 
-  // Poll until status reaches 'funded' (USDC + gas ETH confirmed at burner)
-  await pollUntilFunded(burner, unlinkClient);
   log(`burner ${burner.address} funded and ready`);
 
   const burnerPrivateKey = storage.privateKey;
@@ -258,6 +282,29 @@ async function teardownSession(
 
   await burner.deleteKey();
   log("teardown complete — burner key destroyed");
+}
+
+/**
+ * Poll a GatewayClient until its available balance exceeds zero.
+ * Circle Gateway processes on-chain deposit events asynchronously —
+ * the balance is not available immediately after the deposit tx confirms.
+ * Typical wait: 5–15 seconds on Base Sepolia.
+ */
+export async function pollUntilGatewayFunded(
+  gatewayClient: { getBalances(): Promise<{ gateway?: { formattedAvailable?: string } }> },
+  timeoutMs = 60_000,
+  intervalMs = 3_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const b = await gatewayClient.getBalances();
+    const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
+    if (available > 0) return;
+    await sleep(intervalMs);
+  }
+  throw new Error(
+    `Timeout waiting for Gateway balance to become available (${timeoutMs / 1000}s)`
+  );
 }
 
 function sleep(ms: number): Promise<void> {

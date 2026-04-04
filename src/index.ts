@@ -23,7 +23,7 @@ import { homedir } from "os";
 import { privateKeyToAccount } from "viem/accounts";
 // @ts-ignore — SDK subpath export types don't resolve under all tsconfig modes
 import { GatewayClient } from "@circle-fin/x402-batching/client";
-import { startBurnerSession, type BurnerSession } from "./unlink/index.js";
+import { startBurnerSession, pollUntilGatewayFunded, type BurnerSession } from "./unlink/index.js";
 
 // ── Wallet Management ─────────────────────────────────────────────────────
 // Auto-generates a wallet on first run; stores at ~/.nanocrawl/wallet.json.
@@ -816,6 +816,8 @@ async function main() {
       log(`Privacy mode: ON — burner ${unlinkSession.burnerAddress} (Base Sepolia)`);
       log(`Privacy mode: depositing ${sessionAmount} USDC into Gateway from burner...`);
       await client.deposit(sessionAmount);
+      log("Privacy mode: waiting for Circle Gateway to process deposit...");
+      await pollUntilGatewayFunded(client);
       log(`Privacy mode: ready — ${sessionAmount} USDC in Gateway, identity shielded`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
