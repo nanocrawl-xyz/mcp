@@ -231,9 +231,11 @@ async function main() {
 
   const balFinal = await gw.getBalances();
   const remaining = balFinal?.gateway?.formattedAvailable ?? "0";
-  if (parseFloat(remaining) > 0.000001) {
+  if (parseFloat(remaining) >= 0.1) {
     log(`  Withdrawing ${remaining} USDC from Gateway back to burner...`);
     await gw.withdraw(remaining);
+  } else {
+    log(`  Remaining ${remaining} USDC below Gateway minimum withdrawal (0.1) — leaving in Gateway`);
   }
 
   log("  Returning USDC to Unlink pool (Permit2 approve + depositToPool)...");

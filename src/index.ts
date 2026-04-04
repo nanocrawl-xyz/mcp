@@ -742,7 +742,7 @@ server.registerTool(
     try {
       const b = await client.getBalances().catch(() => null);
       const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
-      if (available > 0.000001) {
+      if (available >= 0.1) {
         log(`close_session: withdrawing ${b!.gateway!.formattedAvailable} USDC from Gateway...`);
         await client.withdraw(b!.gateway!.formattedAvailable);
       }
@@ -777,7 +777,7 @@ async function shutdown(): Promise<void> {
     try {
       const b = await client.getBalances().catch(() => null);
       const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
-      if (available > 0.000001) {
+      if (available >= 0.1) {
         log(`Withdrawing ${b!.gateway!.formattedAvailable} USDC from Gateway...`);
         await client.withdraw(b!.gateway!.formattedAvailable);
       }

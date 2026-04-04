@@ -263,21 +263,29 @@ async function teardownSession(
 
     // Return USDC to the Unlink privacy pool
     log(`teardown: depositing ${balance} units back to pool...`);
-    const result = await burner.depositToPool(unlinkClient, {
-      unlinkAddress: accountKeys.address, // "unlink1..." bech32m
-      token: USDC,
-      amount: balance.toString(),
-      environment: "base-sepolia",
-      chainId: info.chain_id,
-      permit2Address: info.permit2_address,
-      poolAddress: info.pool_address,
-      deadline: Math.floor(Date.now() / 1000) + 3600,
-    });
-
-    await burner.dispose(unlinkClient, result.txId);
+    try {
+      const result = await burner.depositToPool(unlinkClient, {
+        unlinkAddress: accountKeys.address, // "unlink1..." bech32m
+        token: USDC,
+        amount: balance.toString(),
+        environment: "base-sepolia",
+        chainId: info.chain_id,
+        permit2Address: info.permit2_address,
+        poolAddress: info.pool_address,
+        deadline: Math.floor(Date.now() / 1000) + 3600,
+      });
+      await burner.dispose(unlinkClient, result.txId);
+    } catch (err) {
+      // Known canary SDK bug: depositToPool fails with nonce error on some accounts.
+      // USDC remains at burner address on-chain — not returned to pool.
+      // We still destroy the key so the burner is abandoned (not reusable).
+      log(`teardown: depositToPool failed (Unlink SDK bug) — ${err instanceof Error ? err.message : err}`);
+      log(`teardown: ${balance} units (~${Number(balance) / 1e6} USDC) left at burner, key will be destroyed`);
+      await burner.dispose(unlinkClient).catch(() => {});
+    }
   } else {
     log("teardown: no USDC to return, disposing burner");
-    await burner.dispose(unlinkClient);
+    await burner.dispose(unlinkClient).catch(() => {});
   }
 
   await burner.deleteKey();
