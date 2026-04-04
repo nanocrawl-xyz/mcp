@@ -38,6 +38,8 @@ const ARC_RPC = "https://rpc.testnet.arc.network";
 
 const SELLER_URL = "https://nanocrawl.vercel.app/products/1";
 const SESSION_AMOUNT = process.env.NANOCRAWL_UNLINK_SESSION_AMOUNT ?? "0.1";
+// Set NANOCRAWL_UNLINK_PAYMENT_CHAIN=baseSepolia to test native single-chain flow
+const PAYMENT_CHAIN = (process.env.NANOCRAWL_UNLINK_PAYMENT_CHAIN ?? "arcTestnet") as "arcTestnet" | "baseSepolia";
 
 const erc20TransferAbi = [
   {
@@ -170,23 +172,27 @@ async function main() {
   log(`  (on Base Sepolia: this address, NOT your real EOA, is visible)`);
   console.log("");
 
-  // ── Step 2: Fund burner with Arc Testnet USDC from real EOA ──────────────
-  log("Funding burner with Arc Testnet USDC from real EOA...");
-  log("(testnet caveat: this tx links real EOA → burner on Arc Testnet)");
-  log("(on mainnet both chains = Base, so no such link would exist)");
-
+  // ── Step 2: Fund burner on payment chain (Arc Testnet only; skip for Base Sepolia) ──
   const realEoaKey = getRealEoaPrivateKey();
   const realEoa = privateKeyToAccount(realEoaKey);
-  log(`  Real EOA: ${realEoa.address}`);
 
-  await fundBurnerOnArc(realEoaKey, session.burnerAddress, SESSION_AMOUNT);
-  log(`✓ Burner funded on Arc Testnet`);
+  if (PAYMENT_CHAIN === "arcTestnet") {
+    log("Funding burner with Arc Testnet USDC from real EOA...");
+    log("(testnet caveat: this tx links real EOA → burner on Arc Testnet)");
+    log("(on mainnet both chains = Base, so no such link would exist)");
+    log(`  Real EOA: ${realEoa.address}`);
+    await fundBurnerOnArc(realEoaKey, session.burnerAddress, SESSION_AMOUNT);
+    log(`✓ Burner funded on Arc Testnet`);
+  } else {
+    log(`Payment chain: baseSepolia — burner already funded by Unlink pool, no extra transfer needed`);
+    log(`  Real EOA: ${realEoa.address} (will NOT appear on-chain — fully private)`);
+  }
   console.log("");
 
   // ── Step 3: GatewayClient with burner key on Arc Testnet ─────────────────
-  log("Creating GatewayClient with burner key (Arc Testnet)...");
+  log(`Creating GatewayClient with burner key (${PAYMENT_CHAIN})...`);
   const gw = new GatewayClient({
-    chain: "arcTestnet",
+    chain: PAYMENT_CHAIN,
     privateKey: session.burnerPrivateKey,
   });
 
