@@ -18,7 +18,8 @@
     "test": "tsx src/test.ts",
     "setup:unlink": "tsx --env-file=.env src/unlink-setup.ts",
     "setup:unlink:check": "tsx --env-file=.env src/unlink-setup.ts --check",
-    "test:unlink": "tsx --env-file=.env src/test-unlink.ts"
+    "test:unlink": "tsx --env-file=.env src/test-unlink.ts",
+    "test:unlink:base": "NANOCRAWL_UNLINK_PAYMENT_CHAIN=baseSepolia tsx --env-file=.env src/test-unlink.ts"
   },
   "dependencies": {
     "@circle-fin/x402-batching": "^2.0.4",
