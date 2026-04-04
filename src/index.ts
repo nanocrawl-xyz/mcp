@@ -17,24 +17,59 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { randomBytes } from "crypto";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+import { privateKeyToAccount } from "viem/accounts";
 // @ts-ignore — SDK subpath export types don't resolve under all tsconfig modes
 import { GatewayClient } from "@circle-fin/x402-batching/client";
 
+// ── Wallet Management ─────────────────────────────────────────────────────
+// Auto-generates a wallet on first run; stores at ~/.nanocrawl/wallet.json.
+// No private key needs to appear in commands, env vars, or config files.
+
+const WALLET_DIR = join(homedir(), ".nanocrawl");
+const WALLET_PATH = join(WALLET_DIR, "wallet.json");
+
+function getOrCreateWallet(): `0x${string}` {
+  // 1. Env var takes priority (for CI, testing, or explicit override)
+  const envKey = process.env.NANOCRAWL_BUYER_PRIVATE_KEY;
+  if (envKey) {
+    return (envKey.startsWith("0x") ? envKey : `0x${envKey}`) as `0x${string}`;
+  }
+
+  // 2. Read from ~/.nanocrawl/wallet.json
+  if (existsSync(WALLET_PATH)) {
+    try {
+      const data = JSON.parse(readFileSync(WALLET_PATH, "utf-8"));
+      if (data.privateKey) {
+        return data.privateKey as `0x${string}`;
+      }
+    } catch {
+      // Corrupted file — regenerate
+    }
+  }
+
+  // 3. Generate a new wallet
+  const key = `0x${randomBytes(32).toString("hex")}` as `0x${string}`;
+  const address = privateKeyToAccount(key).address;
+
+  mkdirSync(WALLET_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    WALLET_PATH,
+    JSON.stringify({ privateKey: key, address }, null, 2),
+    { mode: 0o600 } // owner-only read/write
+  );
+
+  return key;
+}
+
 // ── Configuration ──────────────────────────────────────────────────────────
 
-const BUYER_KEY = process.env.NANOCRAWL_BUYER_PRIVATE_KEY;
 const CHAIN = "arcTestnet" as const;
 const AUTO_DEPOSIT_AMOUNT = process.env.NANOCRAWL_AUTO_DEPOSIT ?? "1";
 const MIN_GATEWAY_BALANCE_USDC = 0.0001;
 const USDC_DECIMALS = 6;
-
-if (!BUYER_KEY) {
-  process.stderr.write(
-    "[nanocrawl] FATAL: NANOCRAWL_BUYER_PRIVATE_KEY is required.\n" +
-      "[nanocrawl] Set it in your environment or MCP server config.\n"
-  );
-  process.exit(1);
-}
 
 // ── In-Memory State ────────────────────────────────────────────────────────
 
@@ -57,10 +92,7 @@ let budgetCapUsdc: number = Number.isFinite(
 
 // ── GatewayClient ──────────────────────────────────────────────────────────
 
-const privateKey: `0x${string}` = (
-  BUYER_KEY.startsWith("0x") ? BUYER_KEY : `0x${BUYER_KEY}`
-) as `0x${string}`;
-
+const privateKey = getOrCreateWallet();
 const client = new GatewayClient({ chain: CHAIN, privateKey });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -594,11 +626,50 @@ server.registerTool(
 // ── Startup ────────────────────────────────────────────────────────────────
 
 async function main() {
+  // When run directly in a terminal (not piped by Claude Code), show setup info
+  if (process.stdin.isTTY) {
+    const isNew = !existsSync(WALLET_PATH) && !process.env.NANOCRAWL_BUYER_PRIVATE_KEY;
+    console.log("");
+    console.log("  NanoCrawl MCP Server");
+    console.log("  ────────────────────");
+    if (isNew) {
+      console.log("  Status:   New wallet created");
+    }
+    console.log(`  Address:  ${client.address}`);
+    console.log(`  Chain:    Arc Testnet`);
+    console.log(`  Wallet:   ${WALLET_PATH}`);
+    console.log("");
+    try {
+      const b = await client.getBalances();
+      const onChain = parseFloat(b?.wallet?.formatted ?? "0");
+      const gateway = parseFloat(b?.gateway?.formattedAvailable ?? "0");
+      console.log(`  On-chain: ${b?.wallet?.formatted ?? "0"} USDC`);
+      console.log(`  Gateway:  ${b?.gateway?.formattedAvailable ?? "0"} USDC`);
+      if (onChain === 0 && gateway === 0) {
+        console.log("");
+        console.log("  Wallet is empty. Please deposit USDC:");
+        console.log("  https://faucet.circle.com");
+        console.log("  (select Arc Testnet, paste the address above)");
+      }
+    } catch {
+      console.log("  Balance:  could not connect");
+      console.log("");
+      console.log("  Please deposit USDC to this address:");
+      console.log("  https://faucet.circle.com");
+      console.log("  (select Arc Testnet, paste the address above)");
+    }
+    console.log("");
+    console.log("  Add to Claude Code:");
+    console.log("  claude mcp add nanocrawl -- npx nanocrawl");
+    console.log("");
+    process.exit(0);
+  }
+
+  // Running as MCP server (stdin piped by Claude Code)
   log("Starting NanoCrawl MCP server...");
   log(`Address: ${client.address}`);
   log(`Chain: ${CHAIN}`);
 
-  // Check balances and auto-deposit if needed
   try {
     const b = await client.getBalances();
     log(`Wallet: ${b?.wallet?.formatted ?? "?"} USDC`);
