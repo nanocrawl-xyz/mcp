@@ -70,14 +70,26 @@ async function main() {
   console.log("");
 
   // ── Step 3: Deposit into Gateway ─────────────────────────────────────────
-  log(`Depositing ${SESSION_AMOUNT} USDC into Gateway from burner...`);
-  const depositResult = await gw.deposit(SESSION_AMOUNT);
-  log(`  Deposit tx: ${depositResult?.depositTxHash ?? "unknown"}`);
-  log("  Waiting for Circle Gateway to process deposit (up to 3 min)...");
-  await pollUntilGatewayFunded(gw);
+  const walletUsdc = parseFloat(balBefore?.wallet?.formatted ?? "0");
+  const gatewayTotal = parseFloat(balBefore?.gateway?.formattedTotal ?? "0");
+
+  if (gatewayTotal > 0) {
+    log(`Gateway already funded (total=${gatewayTotal}) — skipping deposit`);
+  } else if (walletUsdc > 0) {
+    log(`Depositing ${SESSION_AMOUNT} USDC into Gateway from burner...`);
+    const depositResult = await gw.deposit(SESSION_AMOUNT);
+    log(`  Deposit tx: ${depositResult?.depositTxHash ?? "unknown"}`);
+    log("  Waiting for Circle Gateway to index deposit (up to 5 min)...");
+    await pollUntilGatewayFunded(gw, 300_000);
+  } else {
+    // wallet=0 AND gateway=0: a previous deposit tx is on-chain but not yet indexed
+    log("Wallet empty + Gateway empty — previous deposit is on-chain but not yet indexed.");
+    log("Waiting for Circle Gateway to process it (up to 5 min)...");
+    await pollUntilGatewayFunded(gw, 300_000);
+  }
 
   const balAfter = await gw.getBalances();
-  log(`✓ Gateway balance: ${balAfter?.gateway?.formattedAvailable ?? "?"} USDC`);
+  log(`✓ Gateway balance: total=${balAfter?.gateway?.formattedTotal ?? "?"} available=${balAfter?.gateway?.formattedAvailable ?? "?"} USDC`);
   console.log("");
 
   // ── Step 4: Browse one page (the actual payment) ─────────────────────────
