@@ -71,8 +71,9 @@ async function main() {
 
   // ── Step 3: Deposit into Gateway ─────────────────────────────────────────
   log(`Depositing ${SESSION_AMOUNT} USDC into Gateway from burner...`);
-  await gw.deposit(SESSION_AMOUNT);
-  log("Waiting for Circle Gateway to process deposit (up to 60s)...");
+  const depositResult = await gw.deposit(SESSION_AMOUNT);
+  log(`  Deposit tx: ${depositResult?.depositTxHash ?? "unknown"}`);
+  log("  Waiting for Circle Gateway to process deposit (up to 3 min)...");
   await pollUntilGatewayFunded(gw);
 
   const balAfter = await gw.getBalances();

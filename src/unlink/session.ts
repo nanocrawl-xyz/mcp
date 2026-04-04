@@ -285,25 +285,29 @@ async function teardownSession(
 }
 
 /**
- * Poll a GatewayClient until its available balance exceeds zero.
+ * Poll a GatewayClient until its balance exceeds zero.
  * Circle Gateway processes on-chain deposit events asynchronously —
- * the balance is not available immediately after the deposit tx confirms.
- * Typical wait: 5–15 seconds on Base Sepolia.
+ * the balance is not credited immediately after the deposit tx confirms.
+ * We check formattedTotal (reflects deposit sooner than formattedAvailable).
  */
 export async function pollUntilGatewayFunded(
-  gatewayClient: { getBalances(): Promise<{ gateway?: { formattedAvailable?: string } }> },
-  timeoutMs = 60_000,
-  intervalMs = 3_000
+  gatewayClient: { getBalances(): Promise<{ gateway?: { formattedAvailable?: string; formattedTotal?: string } }> },
+  timeoutMs = 180_000,
+  intervalMs = 5_000
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
   while (Date.now() < deadline) {
     const b = await gatewayClient.getBalances();
+    const total = parseFloat(b?.gateway?.formattedTotal ?? "0");
     const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
-    if (available > 0) return;
+    attempt++;
+    log(`Gateway poll #${attempt}: total=${total} available=${available}`);
+    if (total > 0 || available > 0) return;
     await sleep(intervalMs);
   }
   throw new Error(
-    `Timeout waiting for Gateway balance to become available (${timeoutMs / 1000}s)`
+    `Timeout waiting for Gateway balance (${timeoutMs / 1000}s) — check Base Sepolia explorer for deposit tx`
   );
 }
 
