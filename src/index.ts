@@ -23,6 +23,7 @@ import { homedir } from "os";
 import { privateKeyToAccount } from "viem/accounts";
 // @ts-ignore — SDK subpath export types don't resolve under all tsconfig modes
 import { GatewayClient } from "@circle-fin/x402-batching/client";
+import { startBurnerSession, type BurnerSession } from "./unlink/index.js";
 
 // ── Wallet Management ─────────────────────────────────────────────────────
 // Auto-generates a wallet on first run; stores at ~/.nanocrawl/wallet.json.
@@ -91,9 +92,11 @@ let budgetCapUsdc: number = Number.isFinite(
   : Infinity;
 
 // ── GatewayClient ──────────────────────────────────────────────────────────
+// `client` and `unlinkSession` are reassigned in main() when privacy mode is on.
 
 const privateKey = getOrCreateWallet();
-const client = new GatewayClient({ chain: CHAIN, privateKey });
+let client = new GatewayClient({ chain: CHAIN, privateKey });
+let unlinkSession: BurnerSession | null = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -623,7 +626,124 @@ server.registerTool(
   }
 );
 
+// ── Tool: unlink_status ────────────────────────────────────────────────────
+
+server.registerTool(
+  "unlink_status",
+  {
+    description:
+      "Check whether Unlink privacy mode is active. When ON, all payments are " +
+      "made from a disposable burner wallet — your real identity is shielded on-chain.",
+    inputSchema: {},
+  },
+  async () => {
+    if (!unlinkSession) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: [
+              "Privacy mode: OFF",
+              `Chain: ${CHAIN} (Arc Testnet)`,
+              `Address: ${client.address}`,
+              "",
+              "To enable privacy mode, set NANOCRAWL_UNLINK_MNEMONIC and",
+              "NANOCRAWL_UNLINK_API_KEY and restart the server.",
+            ].join("\n"),
+          },
+        ],
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: [
+            "Privacy mode: ON (Unlink BurnerWallet)",
+            `Chain: baseSepolia`,
+            `Burner address: ${unlinkSession.burnerAddress}`,
+            "",
+            "On-chain activity is linked to the burner, not your real wallet.",
+            "Call close_session() when done to return funds and destroy the burner key.",
+          ].join("\n"),
+        },
+      ],
+    };
+  }
+);
+
+// ── Tool: close_session ────────────────────────────────────────────────────
+
+server.registerTool(
+  "close_session",
+  {
+    description:
+      "End the Unlink privacy session: withdraw remaining Gateway funds to the " +
+      "burner, return them to the Unlink pool, and permanently destroy the burner key. " +
+      "Call this when you are done crawling for the session.",
+    inputSchema: {},
+  },
+  async () => {
+    if (!unlinkSession) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "No active Unlink session — running in standard mode.",
+          },
+        ],
+      };
+    }
+    try {
+      const b = await client.getBalances().catch(() => null);
+      const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
+      if (available > 0.000001) {
+        log(`close_session: withdrawing ${b!.gateway!.formattedAvailable} USDC from Gateway...`);
+        await client.withdraw(b!.gateway!.formattedAvailable);
+      }
+      await unlinkSession.teardown();
+      unlinkSession = null;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Session closed. Remaining USDC returned to Unlink pool. Burner key destroyed.",
+          },
+        ],
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text" as const, text: `Session teardown failed: ${msg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // ── Startup ────────────────────────────────────────────────────────────────
+
+// ── Graceful shutdown ──────────────────────────────────────────────────────
+// In Unlink mode: withdraw Gateway balance back to burner, then return to pool.
+
+async function shutdown(): Promise<void> {
+  if (unlinkSession) {
+    log("Privacy mode: initiating session teardown on shutdown...");
+    try {
+      const b = await client.getBalances().catch(() => null);
+      const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
+      if (available > 0.000001) {
+        log(`Withdrawing ${b!.gateway!.formattedAvailable} USDC from Gateway...`);
+        await client.withdraw(b!.gateway!.formattedAvailable);
+      }
+      await unlinkSession.teardown();
+      log("Privacy mode: session torn down, funds returned to pool");
+    } catch (err) {
+      log(`Privacy mode: teardown error — ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  process.exit(0);
+}
 
 async function main() {
   // When run directly in a terminal (not piped by Claude Code), show setup info
@@ -667,18 +787,61 @@ async function main() {
 
   // Running as MCP server (stdin piped by Claude Code)
   log("Starting NanoCrawl MCP server...");
-  log(`Address: ${client.address}`);
-  log(`Chain: ${CHAIN}`);
 
-  try {
-    const b = await client.getBalances();
-    log(`Wallet: ${b?.wallet?.formatted ?? "?"} USDC`);
-    log(`Gateway: ${b?.gateway?.formattedAvailable ?? "?"} USDC`);
-    await ensureGatewayBalance();
-  } catch (err) {
-    log(`Warning: initial balance check failed — ${err instanceof Error ? err.message : err}`);
-    log("Payments will attempt deposit on first browse() call.");
+  // ── Unlink Privacy Mode ──────────────────────────────────────────────────
+  // If NANOCRAWL_UNLINK_MNEMONIC + NANOCRAWL_UNLINK_API_KEY are set, start a
+  // BurnerWallet session. The burner's GatewayClient replaces the default one.
+  const unlinkMnemonic = process.env.NANOCRAWL_UNLINK_MNEMONIC;
+  const unlinkApiKey = process.env.NANOCRAWL_UNLINK_API_KEY;
+
+  if (unlinkMnemonic && unlinkApiKey) {
+    const sessionAmount = process.env.NANOCRAWL_UNLINK_SESSION_AMOUNT ?? "5";
+    log(`Privacy mode: starting Unlink BurnerWallet session (${sessionAmount} USDC)...`);
+    log("This may take up to 2 minutes for ZK proof generation and gas funding.");
+    try {
+      unlinkSession = await startBurnerSession({
+        mnemonic: unlinkMnemonic,
+        apiKey: unlinkApiKey,
+        sessionAmountUsdc: sessionAmount,
+        engineUrl: process.env.NANOCRAWL_UNLINK_ENGINE_URL,
+        rpcUrl: process.env.RPC_URL,
+      });
+      // Replace Arc Testnet client with burner-backed Base Sepolia client
+      client = new GatewayClient({
+        chain: "baseSepolia",
+        privateKey: unlinkSession.burnerPrivateKey,
+      });
+      log(`Privacy mode: ON — burner ${unlinkSession.burnerAddress} (Base Sepolia)`);
+      log(`Privacy mode: depositing ${sessionAmount} USDC into Gateway from burner...`);
+      await client.deposit(sessionAmount);
+      log(`Privacy mode: ready — ${sessionAmount} USDC in Gateway, identity shielded`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`Privacy mode: startup failed — ${msg}`);
+      log("Falling back to standard mode (Arc Testnet, identity not shielded)");
+      unlinkSession = null;
+    }
   }
+
+  log(`Address: ${client.address}`);
+  log(`Chain: ${unlinkSession ? "baseSepolia (Unlink privacy mode)" : CHAIN}`);
+
+  if (!unlinkSession) {
+    // Standard mode: check balance and auto-deposit if Gateway is underfunded
+    try {
+      const b = await client.getBalances();
+      log(`Wallet: ${b?.wallet?.formatted ?? "?"} USDC`);
+      log(`Gateway: ${b?.gateway?.formattedAvailable ?? "?"} USDC`);
+      await ensureGatewayBalance();
+    } catch (err) {
+      log(`Warning: initial balance check failed — ${err instanceof Error ? err.message : err}`);
+      log("Payments will attempt deposit on first browse() call.");
+    }
+  }
+
+  // Register shutdown handlers — in Unlink mode this returns funds to pool
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
