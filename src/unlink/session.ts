@@ -307,15 +307,21 @@ export async function pollUntilGatewayFunded(
   let attempt = 0;
   while (Date.now() < deadline) {
     const b = await gatewayClient.getBalances();
-    const total = parseFloat(b?.gateway?.formattedTotal ?? "0");
+    const total     = parseFloat(b?.gateway?.formattedTotal     ?? "0");
     const available = parseFloat(b?.gateway?.formattedAvailable ?? "0");
     attempt++;
-    log(`Gateway poll #${attempt}: total=${total} available=${available}`);
-    if (total > 0 || available > 0) return;
+    const elapsed = `${(attempt * intervalMs / 1000).toFixed(0)}s`;
+    if (total > 0 || available > 0) {
+      log(`Gateway indexed ✓  total=${total} available=${available}  (poll #${attempt}, ${elapsed})`);
+      return;
+    }
+    log(`Gateway poll #${String(attempt).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
     await sleep(intervalMs);
   }
   throw new Error(
-    `Timeout waiting for Gateway balance (${timeoutMs / 1000}s) — check Base Sepolia explorer for deposit tx`
+    `Timeout (${timeoutMs / 1000}s, ${attempt} polls) — Circle Gateway did not credit deposit.\n` +
+    `    Deposit is on-chain but indexer is not watching this chain.\n` +
+    `    Run test:unlink (Arc Testnet) as workaround.`
   );
 }
 
