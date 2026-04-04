@@ -15,7 +15,9 @@
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "tsx src/test.ts"
+    "test": "tsx src/test.ts",
+    "setup:unlink": "tsx src/unlink-setup.ts",
+    "setup:unlink:check": "tsx src/unlink-setup.ts --check"
   },
   "dependencies": {
     "@circle-fin/x402-batching": "^2.0.4",
