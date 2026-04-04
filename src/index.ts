@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * NanoCrawl MCP Server — agent-side buyer for pay-per-page web browsing.
  *
@@ -15,6 +16,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { randomBytes } from "crypto";
 // @ts-ignore — SDK subpath export types don't resolve under all tsconfig modes
 import { GatewayClient } from "@circle-fin/x402-batching/client";
 
@@ -41,9 +43,11 @@ interface Receipt {
   amountUsdc: string;
   transaction: string;
   timestamp: string;
+  content: string;
 }
 
 const receipts: Receipt[] = [];
+const contentCache = new Map<string, Receipt>(); // URL → cached result (idempotency)
 let totalSpendUsdc = 0;
 let budgetCapUsdc: number = Number.isFinite(
   parseFloat(process.env.NANOCRAWL_BUDGET ?? "")
@@ -88,6 +92,164 @@ async function ensureGatewayBalance(): Promise<void> {
   log(`Deposited ${deposit.formattedAmount} USDC into Gateway`);
 }
 
+// ── Proactive Payment Flow ─────────────────────────────────────────────────
+// Parses robots.txt once per domain, caches payment metadata, then constructs
+// EIP-3009 authorizations locally — skipping the 402 round-trip entirely.
+// First browse() to a domain uses the standard flow; subsequent calls use proactive.
+
+interface DomainPaymentMeta {
+  network: string;
+  chainId: number;
+  asset: string;
+  payTo: string;
+  verifyingContract: string;
+  maxTimeoutSeconds: number;
+  crawlFeeUsdc: number;
+}
+
+const domainMetaCache = new Map<string, DomainPaymentMeta>();
+
+function parseRobotsTxt(text: string): DomainPaymentMeta | null {
+  const get = (key: string) =>
+    text.match(new RegExp(`${key}:\\s*(.+)`, "i"))?.[1]?.trim();
+
+  const payTo = get("Payment-PayTo");
+  const network = get("Payment-Network");
+  const asset = get("Payment-Asset");
+  const vc = get("Payment-VerifyingContract");
+  const feeStr = get("Crawl-fee");
+
+  if (!payTo || !network || !asset || !vc || !feeStr) return null;
+  const crawlFeeUsdc = parseFloat(feeStr);
+  if (isNaN(crawlFeeUsdc)) return null;
+
+  return {
+    network,
+    chainId: parseInt(network.split(":")[1], 10),
+    asset,
+    payTo,
+    verifyingContract: vc,
+    maxTimeoutSeconds: parseInt(get("Payment-MaxTimeoutSeconds") ?? "345600", 10),
+    crawlFeeUsdc,
+  };
+}
+
+async function getDomainMeta(url: string): Promise<DomainPaymentMeta | null> {
+  const origin = new URL(url).origin;
+  if (domainMetaCache.has(origin)) return domainMetaCache.get(origin)!;
+
+  try {
+    const res = await fetch(`${origin}/robots.txt`, {
+      headers: { "User-Agent": "NanoCrawl/1.0" },
+    });
+    if (!res.ok) return null;
+    const meta = parseRobotsTxt(await res.text());
+    if (meta) {
+      domainMetaCache.set(origin, meta);
+      log(`Cached payment metadata for ${origin} (${meta.crawlFeeUsdc} USDC/page)`);
+    }
+    return meta;
+  } catch {
+    return null;
+  }
+}
+
+async function proactiveBrowse(
+  url: string
+): Promise<{ data: unknown; formattedAmount: string; transaction: string; status: number } | null> {
+  const meta = await getDomainMeta(url);
+  if (!meta) return null;
+
+  const amountUnits = Math.round(meta.crawlFeeUsdc * 10 ** USDC_DECIMALS).toString();
+  const nonce = `0x${randomBytes(32).toString("hex")}` as `0x${string}`;
+  const validBefore = BigInt(Math.floor(Date.now() / 1000) + 5 * 24 * 60 * 60);
+
+  // Sign EIP-3009 TransferWithAuthorization using EIP-712 (GatewayWalletBatched domain)
+  const authorization = {
+    from: client.address,
+    to: meta.payTo as `0x${string}`,
+    value: amountUnits,
+    validAfter: "0",
+    validBefore: validBefore.toString(),
+    nonce,
+  };
+
+  const signature = await client.account.signTypedData({
+    domain: {
+      name: "GatewayWalletBatched",
+      version: "1",
+      chainId: meta.chainId,
+      verifyingContract: meta.verifyingContract as `0x${string}`,
+    },
+    types: {
+      TransferWithAuthorization: [
+        { name: "from", type: "address" },
+        { name: "to", type: "address" },
+        { name: "value", type: "uint256" },
+        { name: "validAfter", type: "uint256" },
+        { name: "validBefore", type: "uint256" },
+        { name: "nonce", type: "bytes32" },
+      ],
+    },
+    primaryType: "TransferWithAuthorization" as const,
+    message: {
+      from: client.address,
+      to: meta.payTo as `0x${string}`,
+      value: BigInt(amountUnits),
+      validAfter: 0n,
+      validBefore,
+      nonce,
+    },
+  });
+
+  // Build x402 v2 PAYMENT-SIGNATURE payload
+  const paymentPayload = {
+    x402Version: 2,
+    resource: { url, mimeType: "application/json", description: "NanoCrawl paid content" },
+    accepted: {
+      scheme: "exact",
+      network: meta.network,
+      asset: meta.asset,
+      amount: amountUnits,
+      payTo: meta.payTo,
+      maxTimeoutSeconds: meta.maxTimeoutSeconds,
+      extra: {
+        name: "GatewayWalletBatched",
+        version: "1",
+        verifyingContract: meta.verifyingContract,
+      },
+    },
+    payload: { signature, authorization },
+  };
+
+  const encoded = Buffer.from(JSON.stringify(paymentPayload)).toString("base64");
+
+  // Single request — payment attached upfront, no 402 round-trip
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "NanoCrawl/1.0 (AI agent; +https://nanocrawl.vercel.app)",
+      "X-NanoCrawl-Capable": "true",
+      "Payment-Signature": encoded,
+    },
+    redirect: "follow",
+  });
+
+  if (res.status !== 200) return null;
+
+  // Extract settlement ID from PAYMENT-RESPONSE header
+  let transaction = "proactive";
+  const prHeader = res.headers.get("payment-response");
+  if (prHeader) {
+    try {
+      const pr = JSON.parse(Buffer.from(prHeader, "base64").toString("utf-8"));
+      transaction = pr.transaction ?? "proactive";
+    } catch { /* use default */ }
+  }
+
+  const data = await res.json().catch(() => res.text());
+  return { data, formattedAmount: meta.crawlFeeUsdc.toFixed(6), transaction, status: 200 };
+}
+
 // ── MCP Server Setup ───────────────────────────────────────────────────────
 
 const server = new McpServer(
@@ -119,6 +281,22 @@ server.registerTool(
     },
   },
   async ({ url }: { url: string }) => {
+    // Idempotency: return cached content if we already paid for this URL
+    const cached = contentCache.get(url);
+    if (cached) {
+      log(`Cache hit for ${url} (paid ${cached.amountUsdc} USDC earlier)`);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `[Cached — already paid ${cached.amountUsdc} USDC | TX: ${cached.transaction}]\n\n` +
+              cached.content,
+          },
+        ],
+      };
+    }
+
     if (totalSpendUsdc >= budgetCapUsdc) {
       return {
         content: [
@@ -135,24 +313,43 @@ server.registerTool(
 
     try {
       await ensureGatewayBalance();
-      const result = await client.pay(url);
+
+      // Try proactive flow first (single request, no 402 round-trip)
+      let result: { data: unknown; formattedAmount: string; transaction: string; status: number };
+      let flowType: string;
+
+      const proactive = await proactiveBrowse(url).catch(() => null);
+      if (proactive) {
+        result = proactive;
+        flowType = "proactive";
+      } else {
+        // Fall back to standard 2-request flow
+        result = await client.pay(url);
+        flowType = "standard";
+        // Cache domain metadata for future proactive calls
+        getDomainMeta(url).catch(() => {});
+      }
 
       const amountUsdc = parseFloat(result.formattedAmount);
       totalSpendUsdc += amountUsdc;
-
-      receipts.push({
-        url,
-        amountUsdc: result.formattedAmount,
-        transaction: result.transaction,
-        timestamp: new Date().toISOString(),
-      });
-
-      log(`Paid ${result.formattedAmount} USDC for ${url} (tx: ${result.transaction})`);
 
       const content =
         typeof result.data === "string"
           ? result.data
           : JSON.stringify(result.data, null, 2);
+
+      const receipt: Receipt = {
+        url,
+        amountUsdc: result.formattedAmount,
+        transaction: result.transaction,
+        timestamp: new Date().toISOString(),
+        content,
+      };
+
+      receipts.push(receipt);
+      contentCache.set(url, receipt);
+
+      log(`[${flowType}] Paid ${result.formattedAmount} USDC for ${url} (tx: ${result.transaction})`);
 
       const budgetNote =
         budgetCapUsdc !== Infinity
@@ -164,7 +361,7 @@ server.registerTool(
           {
             type: "text" as const,
             text:
-              `Paid ${result.formattedAmount} USDC | TX: ${result.transaction}${budgetNote}\n\n` +
+              `[${flowType}] Paid ${result.formattedAmount} USDC | TX: ${result.transaction}${budgetNote}\n\n` +
               content,
           },
         ],

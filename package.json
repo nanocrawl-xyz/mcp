@@ -1,20 +1,25 @@
 {
-  "name": "@nanocrawl/mcp-server",
-  "version": "0.1.0",
+  "name": "nanocrawl",
+  "version": "0.1.1",
   "description": "MCP server for AI agents to pay-per-page browse the web via Circle Nanopayments",
   "type": "module",
   "bin": {
+    "@nanocrawl/mcp-server": "./dist/index.js",
     "nanocrawl-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "tsx src/test.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@circle-fin/x402-batching": "^2.0.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@x402/core": "^2.3.0",
     "@x402/evm": "^2.9.0",
     "viem": "^2.21.0",
