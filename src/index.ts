@@ -349,20 +349,22 @@ server.registerTool(
     try {
       await ensureGatewayBalance();
 
-      // Try proactive flow first (single request, no 402 round-trip)
+      // Proactive flow reads network from robots.txt — only safe on Arc Testnet.
+      // In Unlink mode (Base Sepolia) use standard flow: GatewayClient negotiates
+      // the right network from the seller's accepts[] automatically.
       let result: { data: unknown; formattedAmount: string; transaction: string; status: number };
       let flowType: string;
 
-      const proactive = await proactiveBrowse(url).catch(() => null);
+      const proactive = unlinkSession ? null : await proactiveBrowse(url).catch(() => null);
       if (proactive) {
         result = proactive;
         flowType = "proactive";
       } else {
-        // Fall back to standard 2-request flow
+        // Standard 2-request flow (always used in Unlink/Base Sepolia mode)
         result = await client.pay(url);
-        flowType = "standard";
-        // Cache domain metadata for future proactive calls
-        getDomainMeta(url).catch(() => {});
+        flowType = unlinkSession ? "standard (private)" : "standard";
+        // Cache domain metadata for future proactive calls (standard mode only)
+        if (!unlinkSession) getDomainMeta(url).catch(() => {});
       }
 
       const amountUsdc = parseFloat(result.formattedAmount);
