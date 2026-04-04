@@ -301,7 +301,8 @@ async function teardownSession(
 export async function pollUntilGatewayFunded(
   gatewayClient: { getBalances(): Promise<{ gateway?: { formattedAvailable?: string; formattedTotal?: string } }> },
   timeoutMs = 180_000,
-  intervalMs = 5_000
+  intervalMs = 5_000,
+  onPoll?: (attempt: number, elapsed: string, total: number, available: number) => void
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
@@ -312,10 +313,12 @@ export async function pollUntilGatewayFunded(
     attempt++;
     const elapsed = `${(attempt * intervalMs / 1000).toFixed(0)}s`;
     if (total > 0 || available > 0) {
-      log(`Gateway indexed ✓  total=${total} available=${available}  (poll #${attempt}, ${elapsed})`);
+      if (onPoll) onPoll(attempt, elapsed, total, available);
+      else log(`Gateway indexed ✓  total=${total} available=${available}  (poll #${attempt}, ${elapsed})`);
       return;
     }
-    log(`Gateway poll #${String(attempt).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+    if (onPoll) onPoll(attempt, elapsed, total, available);
+    else log(`Gateway poll #${String(attempt).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
     await sleep(intervalMs);
   }
   throw new Error(

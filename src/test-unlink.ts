@@ -29,7 +29,8 @@ const ARC_RPC   = "https://rpc.testnet.arc.network";
 const GW_WALLET = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
 
 const SELLER_URL    = "https://nanocrawl.vercel.app/products/1";
-const SESSION_AMOUNT = process.env.NANOCRAWL_UNLINK_SESSION_AMOUNT ?? "0.1";
+// Normalise so ".1" in .env renders as "0.1" in output
+const SESSION_AMOUNT = String(parseFloat(process.env.NANOCRAWL_UNLINK_SESSION_AMOUNT ?? "0.1"));
 const PAYMENT_CHAIN  = (process.env.NANOCRAWL_UNLINK_PAYMENT_CHAIN ?? "arcTestnet") as "arcTestnet" | "baseSepolia";
 
 // ── Explorer links ────────────────────────────────────────────────────────────
@@ -200,10 +201,16 @@ async function main() {
     } else {
       info(`Polling Circle Gateway API...`);
     }
-    await pollUntilGatewayFunded(gw, 180_000);
+    await pollUntilGatewayFunded(gw, 180_000, 5_000, (n, elapsed, total, avail) => {
+      if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
+      else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+    });
   } else {
     info(`Wallet empty — previous deposit on-chain, waiting for Circle to index...`);
-    await pollUntilGatewayFunded(gw, 180_000);
+    await pollUntilGatewayFunded(gw, 180_000, 5_000, (n, elapsed, total, avail) => {
+      if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
+      else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+    });
   }
 
   const balAfter = await gw.getBalances();
