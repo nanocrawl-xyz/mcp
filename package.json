@@ -14,11 +14,11 @@
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --env-file=.env src/index.ts",
     "test": "tsx src/test.ts",
-    "setup:unlink": "tsx src/unlink-setup.ts",
-    "setup:unlink:check": "tsx src/unlink-setup.ts --check",
-    "test:unlink": "tsx src/test-unlink.ts"
+    "setup:unlink": "tsx --env-file=.env src/unlink-setup.ts",
+    "setup:unlink:check": "tsx --env-file=.env src/unlink-setup.ts --check",
+    "test:unlink": "tsx --env-file=.env src/test-unlink.ts"
   },
   "dependencies": {
     "@circle-fin/x402-batching": "^2.0.4",
