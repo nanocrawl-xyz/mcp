@@ -1,6 +1,6 @@
 {
   "name": "nanocrawl",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "MCP server for AI agents to pay-per-page browse the web via Circle Nanopayments",
   "type": "module",
   "bin": {
