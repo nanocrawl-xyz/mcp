@@ -194,23 +194,25 @@ async function main() {
     depositTxHash = depositResult?.depositTxHash;
     ok(`Deposit tx confirmed on-chain`);
     info(`Tx      : ${paymentExplorer.tx(depositTxHash ?? "unknown")}`);
-    if (isBaseSepolia) {
-      info(`USDC left the burner wallet — now inside GatewayWallet contract on-chain`);
-      info(`Polling Circle Gateway API for balance credit...`);
-      warn(`⬇  If indexer is not watching Base Sepolia, polls will show 0 indefinitely`);
-    } else {
-      info(`Polling Circle Gateway API...`);
+    info(`Brief wait for Circle Gateway to index deposit...`);
+    try {
+      await pollUntilGatewayFunded(gw, 5_000, 2_500, (n, elapsed, total, avail) => {
+        if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
+        else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+      });
+    } catch {
+      warn(`Gateway not indexed yet — attempting payment anyway`);
     }
-    await pollUntilGatewayFunded(gw, 180_000, 5_000, (n, elapsed, total, avail) => {
-      if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
-      else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
-    });
   } else {
     info(`Wallet empty — previous deposit on-chain, waiting for Circle to index...`);
-    await pollUntilGatewayFunded(gw, 180_000, 5_000, (n, elapsed, total, avail) => {
-      if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
-      else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
-    });
+    try {
+      await pollUntilGatewayFunded(gw, 5_000, 2_500, (n, elapsed, total, avail) => {
+        if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
+        else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+      });
+    } catch {
+      warn(`Gateway not indexed yet — attempting payment anyway`);
+    }
   }
 
   const balAfter = await gw.getBalances();
@@ -231,9 +233,11 @@ async function main() {
   const balFinal  = await gw.getBalances();
   const remaining = balFinal?.gateway?.formattedAvailable ?? "0";
 
-  if (parseFloat(remaining) >= 0.1) {
-    info(`Withdrawing ${remaining} USDC from Gateway → burner...`);
-    await gw.withdraw(remaining);
+  // Subtract small buffer to avoid Gateway rounding-up errors
+  const withdrawAmount = String(Math.floor((parseFloat(remaining) - 0.002) * 1000) / 1000);
+  if (parseFloat(withdrawAmount) >= 0.1) {
+    info(`Withdrawing ${withdrawAmount} USDC from Gateway → burner...`);
+    await gw.withdraw(withdrawAmount);
     ok(`Gateway withdrawn`);
   } else {
     info(`Remaining ${remaining} USDC below Gateway min withdrawal (0.1) — left in Gateway`);

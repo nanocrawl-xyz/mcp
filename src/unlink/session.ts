@@ -19,6 +19,9 @@ import {
   unlinkAccount,
   BurnerWallet,
   UnlinkApiError,
+  createUser,
+  getUser,
+  requestPrivateTokens,
 } from "@unlink-xyz/sdk";
 import {
   createWalletClient,
@@ -31,8 +34,9 @@ import { CapturingBurnerStorage, loadPersistedBurner } from "./storage.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/** Circle's official USDC on Base Sepolia */
-const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as const;
+/** Unlink faucet test token on Base Sepolia (18 decimals) */
+const POOL_TOKEN = "0x7501de8ea37a21e20e6e65947d2ecab0e9f061a7" as const;
+const POOL_TOKEN_DECIMALS = 18;
 
 const DEFAULT_ENGINE_URL = "https://staging-api.unlink.xyz";
 const DEFAULT_RPC_URL = "https://sepolia.base.org";
@@ -121,6 +125,16 @@ export async function startBurnerSession(
   const account = unlinkAccount.fromMnemonic({ mnemonic: config.mnemonic });
   const accountKeys = await account.getAccountKeys();
 
+  // Ensure the Unlink account is registered (lazy registration)
+  try {
+    await getUser(unlinkClient, accountKeys.address);
+    log(`user ${accountKeys.address.slice(0, 20)}... already registered`);
+  } catch {
+    log(`registering user ${accountKeys.address.slice(0, 20)}...`);
+    await createUser(unlinkClient, accountKeys);
+    log(`user registered`);
+  }
+
   // Check for a burner persisted from a previous session (crash recovery).
   // If one exists and is still 'funded', restore it instead of draining the pool again.
   const storage = new CapturingBurnerStorage();
@@ -133,13 +147,19 @@ export async function startBurnerSession(
     await storage.save(persisted.address, persisted.privateKey);
     const restored = await BurnerWallet.restore(persisted.address as Address, storage);
     if (restored) {
-      const status = await restored.getStatus(unlinkClient);
-      if (status.status === "funded") {
-        log(`restoring funded burner ${persisted.address} (skipping fundFromPool)`);
-        burner = restored;
-      } else {
-        log(`persisted burner status=${status.status} — creating fresh burner`);
-        await storage.delete(persisted.address); // clear stale file
+      try {
+        const status = await restored.getStatus(unlinkClient);
+        if (status.status === "funded") {
+          log(`restoring funded burner ${persisted.address} (skipping fundFromPool)`);
+          burner = restored;
+        } else {
+          log(`persisted burner status=${status.status} — creating fresh burner`);
+          await storage.delete(persisted.address); // clear stale file
+          burner = await BurnerWallet.create(storage);
+        }
+      } catch (err) {
+        log(`persisted burner lookup failed (${err instanceof Error ? err.message : err}) — creating fresh burner`);
+        await storage.delete(persisted.address);
         burner = await BurnerWallet.create(storage);
       }
     } else {
@@ -151,9 +171,9 @@ export async function startBurnerSession(
     log(`burner created: ${burner.address}`);
   }
 
-  // Convert sessionAmountUsdc to USDC base units (6 decimals)
+  // Convert session amount to pool token base units
   const amountUnits = String(
-    Math.round(parseFloat(sessionAmountUsdc) * 1_000_000)
+    BigInt(Math.round(parseFloat(sessionAmountUsdc) * 10 ** POOL_TOKEN_DECIMALS))
   );
 
   // Fund burner only if it isn't already funded (fresh burner path)
@@ -163,17 +183,58 @@ export async function startBurnerSession(
     try {
       await burner.fundFromPool(unlinkClient, {
         senderKeys: accountKeys,
-        token: USDC,
+        token: POOL_TOKEN,
         amount: amountUnits,
         environment: "base-sepolia",
       });
     } catch (err) {
-      if (err instanceof UnlinkApiError) {
+      // If insufficient balance, try faucet then retry
+      const isInsufficientBalance =
+        (err instanceof UnlinkApiError && err.message.includes("insufficient balance")) ||
+        (err instanceof Error && err.message.includes("insufficient balance"));
+      if (isInsufficientBalance) {
+        log(`insufficient pool balance — requesting faucet tokens...`);
+        try {
+          await requestPrivateTokens(unlinkClient, {
+            token: POOL_TOKEN,
+            unlinkAddress: accountKeys.address,
+          });
+          log(`faucet tokens requested — waiting 5s for settlement...`);
+          await sleep(5_000);
+        } catch (faucetErr) {
+          log(`faucet request failed: ${faucetErr instanceof Error ? faucetErr.message : faucetErr}`);
+          throw new Error(
+            `Unlink pool has insufficient balance and faucet failed. ` +
+            `Deposit USDC into your Unlink account or use the faucet at https://hackathon-apikey.vercel.app/faucet`
+          );
+        }
+        // Retry fundFromPool after faucet
+        log(`retrying fundFromPool after faucet...`);
+        try {
+          // Need a fresh burner since the old one may be in a bad state
+          burner = await BurnerWallet.create(storage);
+          log(`fresh burner created: ${burner.address}`);
+          await burner.fundFromPool(unlinkClient, {
+            senderKeys: accountKeys,
+            token: POOL_TOKEN,
+            amount: amountUnits,
+            environment: "base-sepolia",
+          });
+        } catch (retryErr) {
+          if (retryErr instanceof UnlinkApiError) {
+            throw new Error(
+              `Unlink API error during fundFromPool (after faucet): ${retryErr.message} (code: ${retryErr.code})`
+            );
+          }
+          throw retryErr;
+        }
+      } else if (err instanceof UnlinkApiError) {
         throw new Error(
           `Unlink API error during fundFromPool: ${err.message} (code: ${err.code})`
         );
+      } else {
+        throw err;
       }
-      throw err;
     }
     // Poll until status reaches 'funded' (USDC + gas ETH confirmed at burner)
     await pollUntilFunded(burner, unlinkClient);
@@ -233,15 +294,15 @@ async function teardownSession(
     transport: http(rpcUrl),
   });
 
-  // Read current USDC balance at burner (should be the Gateway-withdrawn amount)
+  // Read current pool token balance at burner
   const balance = (await publicClient.readContract({
-    address: USDC,
+    address: POOL_TOKEN,
     abi: erc20BalanceAbi,
     functionName: "balanceOf",
     args: [burnerAddress],
   })) as bigint;
 
-  log(`teardown: burner USDC balance = ${balance} units (${Number(balance) / 1e6} USDC)`);
+  log(`teardown: burner pool token balance = ${balance} units (${Number(balance) / 10 ** POOL_TOKEN_DECIMALS} tokens)`);
 
   if (balance > 0n) {
     const walletClient = createWalletClient({
@@ -250,10 +311,10 @@ async function teardownSession(
       transport: http(rpcUrl),
     });
 
-    // Approve the Permit2 contract to spend the burner's USDC
+    // Approve the Permit2 contract to spend the burner's pool token
     log(`teardown: approving Permit2 for ${balance} units...`);
     const approveTxHash = await walletClient.writeContract({
-      address: USDC,
+      address: POOL_TOKEN,
       abi: erc20ApproveAbi,
       functionName: "approve",
       args: [info.permit2_address as Address, balance],
@@ -266,7 +327,7 @@ async function teardownSession(
     try {
       const result = await burner.depositToPool(unlinkClient, {
         unlinkAddress: accountKeys.address, // "unlink1..." bech32m
-        token: USDC,
+        token: POOL_TOKEN,
         amount: balance.toString(),
         environment: "base-sepolia",
         chainId: info.chain_id,
@@ -280,11 +341,11 @@ async function teardownSession(
       // USDC remains at burner address on-chain — not returned to pool.
       // We still destroy the key so the burner is abandoned (not reusable).
       log(`teardown: depositToPool failed (Unlink SDK bug) — ${err instanceof Error ? err.message : err}`);
-      log(`teardown: ${balance} units (~${Number(balance) / 1e6} USDC) left at burner, key will be destroyed`);
+      log(`teardown: ${balance} units (~${Number(balance) / 10 ** POOL_TOKEN_DECIMALS} tokens) left at burner, key will be destroyed`);
       await burner.dispose(unlinkClient).catch(() => {});
     }
   } else {
-    log("teardown: no USDC to return, disposing burner");
+    log("teardown: no pool tokens to return, disposing burner");
     await burner.dispose(unlinkClient).catch(() => {});
   }
 
