@@ -194,25 +194,17 @@ async function main() {
     depositTxHash = depositResult?.depositTxHash;
     ok(`Deposit tx confirmed on-chain`);
     info(`Tx      : ${paymentExplorer.tx(depositTxHash ?? "unknown")}`);
-    info(`Brief wait for Circle Gateway to index deposit...`);
-    try {
-      await pollUntilGatewayFunded(gw, 5_000, 2_500, (n, elapsed, total, avail) => {
-        if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
-        else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
-      });
-    } catch {
-      warn(`Gateway not indexed yet — attempting payment anyway`);
-    }
+    info(`Waiting for Circle Gateway to index deposit...`);
+    await pollUntilGatewayFunded(gw, 30_000, 3_000, (n, elapsed, total, avail) => {
+      if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
+      else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+    });
   } else {
     info(`Wallet empty — previous deposit on-chain, waiting for Circle to index...`);
-    try {
-      await pollUntilGatewayFunded(gw, 5_000, 2_500, (n, elapsed, total, avail) => {
-        if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
-        else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
-      });
-    } catch {
-      warn(`Gateway not indexed yet — attempting payment anyway`);
-    }
+    await pollUntilGatewayFunded(gw, 30_000, 3_000, (n, elapsed, total, avail) => {
+      if (total > 0 || avail > 0) ok(`Gateway indexed — total=${total} available=${avail}  (poll #${n}, ${elapsed})`);
+      else info(`poll #${String(n).padStart(2)}  [${elapsed} elapsed]  total=0 available=0  — waiting...`);
+    });
   }
 
   const balAfter = await gw.getBalances();
